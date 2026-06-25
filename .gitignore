@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Telegram/Telethon session files (act as login credentials)
+*.session
+*.session-journal
+
+# Local database (contains scraped events + real user IDs)
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -11,15 +11,24 @@ from aiogram.types import BotCommand, KeyboardButton, ReplyKeyboardMarkup
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageService
 
+from dotenv import load_dotenv
+
 from db import init_db
 
-TOKEN = "8987900278:AAHuIiyzmqBFYF2T3IgwyS3KzG4sqR7NAUM"
-DB_NAME = "events_hub.db"
-TARGET_CHAT = "@sutdevents"
-TG_API_ID = 9550531
-TG_API_HASH = "538f9520f27e1f371a479b0b615a9baa"
-TG_PHONE = "+6597286100"
-TG_2FA_PASSWORD = "Xiaopeng1601!"
+load_dotenv()
+
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+DB_NAME = os.getenv("DB_NAME", "events_hub.db")
+TARGET_CHAT = os.getenv("TARGET_CHAT", "@your_telegram_channel")
+TG_API_ID = int(os.getenv("TG_API_ID", "0"))
+TG_API_HASH = os.getenv("TG_API_HASH", "")
+TG_PHONE = os.getenv("TG_PHONE", "")
+TG_2FA_PASSWORD = os.getenv("TG_2FA_PASSWORD", "")
+
+if not TOKEN:
+    raise RuntimeError(
+        "TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and fill in your own credentials."
+    )
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)

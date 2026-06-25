@@ -8,29 +8,37 @@ import logging
 from aiogram import Bot, Dispatcher, types
 from telethon import TelegramClient
 from telethon.tl.types import MessageService
+from dotenv import load_dotenv
 
 from bot import notify_subscribers
+
+load_dotenv()
 
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-# Telegram Bot Token (from @BotFather)
-BOT_TOKEN = "8987900278:AAHuIiyzmqBFYF2T3IgwyS3KzG4sqR7NAUM"
+# Telegram Bot Token (from @BotFather) - set in .env
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# The target chat. Can be a public username (e.g., 'sutd_events'), 
+# The target chat. Can be a public username (e.g., 'sutd_events'),
 # a Chat ID (integer), or a username prefixed with '@'.
 # Note: The bot MUST be a member of this chat to read messages.
-TARGET_CHAT = "@sutdevents" 
+TARGET_CHAT = os.getenv("TARGET_CHAT", "@your_telegram_channel")
 
-# Telegram user-account credentials (embedded for convenience)
-TG_API_ID = 9550531
-TG_API_HASH = "538f9520f27e1f371a479b0b615a9baa"
-TG_PHONE = "+6597286100"
-TG_2FA_PASSWORD = "Xiaopeng1601!"
+# Telegram user-account credentials - set in .env (see .env.example)
+TG_API_ID = os.getenv("TG_API_ID", "0")
+TG_API_HASH = os.getenv("TG_API_HASH", "")
+TG_PHONE = os.getenv("TG_PHONE", "")
+TG_2FA_PASSWORD = os.getenv("TG_2FA_PASSWORD", "")
 
-# Agnes AI & DB Config
-AGNES_API_KEY = "sk-pyD5t6pv90f1eEUGs6qQiwHW3NLotCIoBa9ncKZEc5RQuwKT"
-DB_NAME = "events_hub.db"
+# Agnes AI & DB Config - set in .env
+AGNES_API_KEY = os.getenv("AGNES_API_KEY", "")
+DB_NAME = os.getenv("DB_NAME", "events_hub.db")
+
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and fill in your own credentials."
+    )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
