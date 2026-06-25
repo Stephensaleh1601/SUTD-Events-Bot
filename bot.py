@@ -3,6 +3,8 @@ import hashlib
 import html
 import logging
 import os
+from datetime import date, datetime
+
 import aiosqlite
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
@@ -131,6 +133,68 @@ async def process_and_store_events(raw_data_sources):
         await db.commit()
 
     return events_stored
+
+
+def _parse_event_date(date_str: str):
+    """Parse an event's date string into a date object, or None if it can't be read.
+
+    Agnes AI is prompted to always return YYYY-MM-DD, so that's tried first; a couple
+    of fallback formats are tried too in case of older/odd data. Unparseable dates are
+    left alone by callers rather than guessed at - never delete on uncertainty.
+    """
+    if not date_str:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+async def delete_expired_events(db_name: str = None) -> int:
+    """Delete events whose date has already passed (i.e. it's now the day after, or later).
+
+    A past event/sign-up isn't useful to show subscribers or keep around, so this is
+    run on bot startup and on a recurring loop (see expire_events_loop) to keep the
+    database and /menu listings from accumulating stale entries. Returns the number
+    of rows removed. Rows with an unparseable date are left in place rather than
+    risking deleting something live.
+    """
+    db_name = db_name or DB_NAME
+    today = date.today()
+    async with aiosqlite.connect(db_name) as db:
+        async with db.execute("SELECT id, event_date FROM events") as cursor:
+            rows = await cursor.fetchall()
+
+        expired_ids = []
+        for event_id, event_date in rows:
+            parsed = _parse_event_date(event_date)
+            if parsed is not None and parsed < today:
+                expired_ids.append(event_id)
+
+        if expired_ids:
+            await db.executemany("DELETE FROM events WHERE id = ?", [(i,) for i in expired_ids])
+            await db.commit()
+
+    return len(expired_ids)
+
+
+async def expire_events_loop(interval_seconds: int = 24 * 60 * 60) -> None:
+    """Background task: periodically purge events whose date has passed.
+
+    Runs immediately on startup (to catch anything that expired while the bot was
+    offline), then once every `interval_seconds` (default 24h) for as long as the
+    bot keeps running.
+    """
+    while True:
+        try:
+            removed = await delete_expired_events()
+            if removed:
+                logging.info("🗑️ Removed %d expired event(s).", removed)
+        except Exception as exc:
+            logging.warning("Expired-event cleanup failed: %s", exc)
+        await asyncio.sleep(interval_seconds)
 
 
 async def set_bot_commands(bot: Bot) -> None:
@@ -306,6 +370,7 @@ async def main():
     await init_db()
     await set_bot_commands(bot)
     await bot.delete_webhook(drop_pending_updates=True)
+    asyncio.create_task(expire_events_loop())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

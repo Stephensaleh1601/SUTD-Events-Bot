@@ -9,7 +9,7 @@ from telethon import TelegramClient
 from telethon.tl.types import MessageService
 from dotenv import load_dotenv
 
-from bot import process_and_store_events
+from bot import process_and_store_events, delete_expired_events
 from dedupe import dedupe_exact, dedupe_semantic
 
 load_dotenv()
@@ -211,6 +211,10 @@ async def main():
         "--dedupe", action="store_true",
         help="Scan the database for duplicate events and remove them (exact-match pass, then an Agnes AI semantic pass), then exit",
     )
+    parser.add_argument(
+        "--expire", action="store_true",
+        help="Delete events whose date has already passed, then exit (the running bot also does this automatically every 24h)",
+    )
     args = parser.parse_args()
 
     if args.dedupe:
@@ -222,6 +226,12 @@ async def main():
         print(f"   Removed {removed_semantic} semantic duplicate row(s).")
         total = removed_exact + removed_semantic
         print(f"✅ Dedup complete. {total} total row(s) removed." if total else "✅ Dedup complete. No duplicates found.")
+        return
+
+    if args.expire:
+        print("🗑️ Scanning for events whose date has already passed...")
+        removed = await delete_expired_events(DB_NAME)
+        print(f"✅ Removed {removed} expired event(s)." if removed else "✅ No expired events found.")
         return
 
     bot = Bot(token=BOT_TOKEN)

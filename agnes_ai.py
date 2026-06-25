@@ -124,9 +124,14 @@ def _parse_events(content: str) -> list[dict]:
         date = str(item.get("date", "")).strip()
         if not title or not date:
             continue
-        category = item.get("category", "")
-        if category not in VALID_CATEGORIES:
-            category = "General"
+        # Case-insensitive match against the valid category list, so a minor casing
+        # difference from the model doesn't bump an event into the invisible
+        # "General" bucket (not a real category - no one can subscribe/view it).
+        category_raw = str(item.get("category", "")).strip()
+        category = next(
+            (c for c in VALID_CATEGORIES if c.lower() == category_raw.lower()),
+            "General",
+        )
         events.append({
             "title": title,
             "date": date,
