@@ -42,7 +42,6 @@ CATEGORY_EMOJI = {
     "Scholarships": "🎓",
     "Competitions": "🏆",
     "Volunteer opportunities": "🤝",
-    "CCA sign-ups": "🎭",
     "Fifth Row sign-ups": "🎬",
     "Networking opportunities": "🌐",
 }

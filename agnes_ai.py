@@ -17,7 +17,7 @@ DEFAULT_MODEL = "agnes-2.0-flash"
 VALID_CATEGORIES = [
     "Workshops", "Career talks", "Internship opportunities",
     "Scholarships", "Competitions", "Volunteer opportunities",
-    "CCA sign-ups", "Fifth Row sign-ups", "Networking opportunities",
+    "Fifth Row sign-ups", "Networking opportunities",
 ]
 
 SYSTEM_PROMPT = (
