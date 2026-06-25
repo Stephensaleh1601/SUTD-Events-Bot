@@ -9,6 +9,8 @@ from aiogram import Bot, Dispatcher, types
 from telethon import TelegramClient
 from telethon.tl.types import MessageService
 
+from bot import notify_subscribers
+
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
@@ -107,6 +109,14 @@ def process_and_store_events(raw_data_sources):
             ))
             events_stored += 1
             logger.info(f"💾 Stored new event: {event['title']}")
+            asyncio.create_task(notify_subscribers(
+                event.get('category', 'General'),
+                event['title'],
+                event['date'],
+                event.get('time', ''),
+                event.get('location', ''),
+                event.get('description', ''),
+            ))
             
     conn.commit()
     conn.close()
