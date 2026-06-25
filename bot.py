@@ -1,9 +1,12 @@
 import asyncio
 import hashlib
+import html
 import logging
 import os
 import aiosqlite
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import BotCommand, KeyboardButton, ReplyKeyboardMarkup
@@ -25,8 +28,28 @@ if not TOKEN:
     )
 
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=TOKEN)
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+# Display-only emoji per category. Purely cosmetic - never used for matching,
+# callback_data, or DB lookups, so it can't affect bot behavior.
+CATEGORY_EMOJI = {
+    "Workshops": "🛠️",
+    "Career talks": "💼",
+    "Internship opportunities": "🧑‍💻",
+    "Scholarships": "🎓",
+    "Competitions": "🏆",
+    "Volunteer opportunities": "🤝",
+    "CCA sign-ups": "🎭",
+    "Fifth Row sign-ups": "🎬",
+    "Networking opportunities": "🌐",
+}
+
+
+def category_label(category: str) -> str:
+    """Return a category name prefixed with its display emoji, for UI text only."""
+    return f"{CATEGORY_EMOJI.get(category, '📌')} {category}"
+
 
 QUICK_COMMANDS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
@@ -103,12 +126,15 @@ async def set_bot_commands(bot: Bot) -> None:
 @dp.message(Command("start"))
 async def command_start_handler(message: types.Message):
     """Initializes onboarding sequences by allowing users to toggle their preferred interests."""
+    first_name = html.escape(message.from_user.first_name or "there")
+    categories_list = "\n".join(f"  {category_label(c)}" for c in VALID_CATEGORIES)
     await message.answer(
-        f"Welcome to the Event Hub Bot, {message.from_user.first_name}!\n\n"
-        "Please configure your preferred categories by using the commands below:\n"
-        "• Use `/select <Category Name>` to follow an entry.\n"
-        "• Use `/menu` to check matching event listings once configured.\n\n"
-        "**Available options:**\n" + "\n".join([f"- {c}" for c in VALID_CATEGORIES]),
+        f"👋 <b>Welcome to the SUTD Event Hub Bot, {first_name}!</b>\n\n"
+        "I'll notify you the moment a new event matching your interests is posted.\n\n"
+        "<b>Get started:</b>\n"
+        "1️⃣ <code>/select &lt;Category Name&gt;</code> — follow a category\n"
+        "2️⃣ <code>/menu</code> — view events for your followed categories\n\n"
+        f"<b>Available categories:</b>\n{categories_list}",
         reply_markup=QUICK_COMMANDS_KEYBOARD,
     )
 
@@ -120,17 +146,20 @@ async def select_category(message: types.Message):
     # Simple match check
     matched = next((c for c in VALID_CATEGORIES if c.lower() == category_input.lower()), None)
     if not matched:
-        await message.answer("⚠️ Category not recognized. Please copy the exact name from the options menu list.")
+        await message.answer("⚠️ <b>Category not recognized.</b>\nPlease copy the exact name from the options menu list.")
         return
-        
+
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             "INSERT OR IGNORE INTO user_preferences (user_id, category) VALUES (?, ?)",
             (message.from_user.id, matched)
         )
         await db.commit()
-        
-    await message.answer(f"✅ Subscribed to updates under: **{matched}**! Type `/menu` to view dashboard.")
+
+    await message.answer(
+        f"✅ <b>Subscribed!</b> You'll now get updates for {category_label(matched)}.\n"
+        "Type <code>/menu</code> to view your dashboard."
+    )
 
 @dp.message(F.text.in_(["/start", "/menu"] + [f"/select {cat}" for cat in VALID_CATEGORIES]))
 async def quick_command_handler(message: types.Message):
@@ -153,12 +182,18 @@ async def notify_subscribers(category: str, event_title: str, event_date: str, e
     if not subscribers:
         return
 
+    safe_title = html.escape(event_title)
+    safe_date = html.escape(event_date)
+    safe_time = html.escape(event_time) if event_time else "TBC"
+    safe_location = html.escape(location) if location else "TBC"
+    safe_description = html.escape(description) if description else "—"
+
     message_text = (
-        f"📢 New event in {category}: *{event_title}*\n"
-        f"📅 {event_date} | ⏰ {event_time}\n"
-        f"📍 {location}\n"
-        f"📝 {description}\n\n"
-        "Please take a look!"
+        f"📢 <b>New listing — {category_label(category)}</b>\n\n"
+        f"<b>{safe_title}</b>\n"
+        f"📅 {safe_date}   ⏰ {safe_time}\n"
+        f"📍 {safe_location}\n\n"
+        f"{safe_description}"
     )
 
     for (user_id,) in subscribers:
@@ -176,18 +211,20 @@ async def show_menu(message: types.Message):
             rows = await cursor.fetchall()
             
     if not rows:
-        await message.answer("You haven't customized your configuration profiles yet. Use `/select <category>` first.")
+        await message.answer(
+            "You haven't followed any categories yet.\nUse <code>/select &lt;category&gt;</code> first."
+        )
         return
 
     builder = InlineKeyboardBuilder()
     for row in rows:
         category_name = row[0]
-        # Callback data pattern payload: "view:<category_name>"
-        builder.button(text=category_name, callback_data=f"view:{category_name}")
-    
+        # Callback data pattern payload: "view:<category_name>" - label is display-only.
+        builder.button(text=category_label(category_name), callback_data=f"view:{category_name}")
+
     builder.adjust(1) # Renders one single full-width button per row
     await message.answer(
-        "Select an event channel to review current notices:",
+        "📋 <b>Your followed categories</b>\nTap one to see current listings:",
         reply_markup=builder.as_markup(),
     )
 
@@ -203,26 +240,26 @@ async def handle_category_view(callback_query: types.CallbackQuery):
 
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
-            "SELECT title, event_date, event_time, location, description FROM events WHERE category = ? ORDER BY event_date ASC", 
+            "SELECT title, event_date, event_time, location, description FROM events WHERE category = ? ORDER BY event_date ASC",
             (category,)
         ) as cursor:
             events = await cursor.fetchall()
 
     if not events:
-        await callback_query.message.answer(f"No current postings discovered for category: *{category}*.")
+        await callback_query.message.answer(f"No current postings for {category_label(category)} yet.")
         return
 
-    response_text = f"📋 **Current events cataloged under {category}:**\n\n"
-    for item in events:
-        response_text += (
-            f"🔹 **{item[0]}**\n"
-            f"📅 Date: {item[1]} | ⏰ Time: {item[2]}\n"
-            f"📍 Location: {item[3]}\n"
-            f"📝 {item[4]}\n"
-            f"---------------------------\n"
+    lines = [f"<b>{category_label(category)} — current listings</b>\n"]
+    for title, event_date, event_time, location, description in events:
+        lines.append(
+            f"🔹 <b>{html.escape(title)}</b>\n"
+            f"📅 {html.escape(event_date)}   ⏰ {html.escape(event_time) if event_time else 'TBC'}\n"
+            f"📍 {html.escape(location) if location else 'TBC'}\n"
+            f"{html.escape(description) if description else '—'}\n"
+            "──────────────────"
         )
-        
-    await callback_query.message.answer(response_text)
+
+    await callback_query.message.answer("\n".join(lines))
 
 
 def is_target_group_message(message: types.Message) -> bool:
