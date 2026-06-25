@@ -4,8 +4,8 @@ A Telegram bot that watches a SUTD events channel/group, extracts event details,
 
 ## How it works
 
-- `bot.py` runs the user-facing Telegram bot (aiogram). Users `/start`, `/select` a category to follow, and `/menu` to browse events. It also runs a Telethon listener that watches the target chat for new messages in real time.
-- `ingest.py` is a standalone CLI for fetching message history from the target chat (backfill) or listening for new messages, independent of the bot process.
+- `bot.py` runs the user-facing Telegram bot (aiogram). Users `/start`, `/select` a category to follow, and `/menu` to browse events. The bot is an admin member of the target group, so it picks up new group messages directly through its own aiogram handler — no separate login or listener process needed.
+- `ingest.py` is a standalone CLI for backfilling older message history from the target chat. Since the Bot API can't fetch history older than when the bot joined, this script logs in as a regular Telegram user account via Telethon to pull past messages. It can also run a live Telethon listener as an alternative to the bot, but that's no longer necessary now that the bot is in the group.
 - `db.py` initializes the SQLite schema (`events` and `user_preferences` tables).
 - Both `bot.py` and `ingest.py` call `call_agnes_ai()` to turn raw chat text into structured event fields (title, date, time, location, description, category). **This is currently a mock/placeholder** that returns hardcoded sample data — wire it up to your real Agnes AI (or any LLM) call before relying on it.
 
@@ -23,25 +23,27 @@ A Telegram bot that watches a SUTD events channel/group, extracts event details,
    cp .env.example .env
    ```
 
-   You'll need:
-   - `TELEGRAM_BOT_TOKEN` — create a bot via [@BotFather](https://t.me/BotFather).
-   - `TARGET_CHAT` — the channel/group the bot should read events from.
-   - `TG_API_ID` / `TG_API_HASH` — from [my.telegram.org](https://my.telegram.org), used by Telethon to log in as a regular Telegram user account (required to read group history; bots alone can't do this).
+   To run `bot.py` you'll need:
+   - `TELEGRAM_BOT_TOKEN` — create a bot via [@BotFather](https://t.me/BotFather), then add it to the target group as an admin (so it can read group messages).
+   - `TARGET_CHAT` — the group's public `@username` the bot should read events from. The bot matches incoming messages by `chat.username`, so the group needs a public username.
+   - `AGNES_API_KEY` — API key for whatever AI service you wire into `call_agnes_ai()`. Currently unused since that function is still a mock.
+
+   To use `ingest.py`'s `--history`/`--listen` backfill modes, you'll additionally need these (not in `.env.example` — add them to your `.env` manually):
+   - `TG_API_ID` / `TG_API_HASH` — from [my.telegram.org](https://my.telegram.org), used by Telethon to log in as a regular Telegram user account.
    - `TG_PHONE` — the phone number of the Telegram account used for that login.
    - `TG_2FA_PASSWORD` — only if that account has two-factor authentication enabled.
-   - `AGNES_API_KEY` — API key for whatever AI service you wire into `call_agnes_ai()`.
 
-3. On first run, Telethon will prompt for a login code (and your 2FA password, if set) in the terminal to create a local `.session` file. This file is your login credential for that Telegram account — it's git-ignored and should never be committed or shared.
+3. If you use `ingest.py`'s Telethon-based modes, the first run will prompt for a login code (and your 2FA password, if set) in the terminal to create a local `.session` file. This file is your login credential for that Telegram account — it's git-ignored and should never be committed or shared.
 
 ## Running
 
-Start the bot (polling + live listener):
+Start the bot (polling, including new group messages):
 
 ```bash
 python bot.py
 ```
 
-Or use the ingestion CLI directly:
+Or backfill/listen via the ingestion CLI (requires the Telethon env vars above):
 
 ```bash
 python ingest.py --test              # verify access, print a few messages
