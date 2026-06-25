@@ -2,14 +2,11 @@ import asyncio
 import hashlib
 import logging
 import os
-import sqlite3
 import aiosqlite
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import BotCommand, KeyboardButton, ReplyKeyboardMarkup
-from telethon import TelegramClient, events
-from telethon.tl.types import MessageService
 
 from dotenv import load_dotenv
 
@@ -20,10 +17,6 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DB_NAME = os.getenv("DB_NAME", "events_hub.db")
 TARGET_CHAT = os.getenv("TARGET_CHAT", "@your_telegram_channel")
-TG_API_ID = int(os.getenv("TG_API_ID", "0"))
-TG_API_HASH = os.getenv("TG_API_HASH", "")
-TG_PHONE = os.getenv("TG_PHONE", "")
-TG_2FA_PASSWORD = os.getenv("TG_2FA_PASSWORD", "")
 
 if not TOKEN:
     raise RuntimeError(
@@ -61,70 +54,6 @@ def generate_event_id(title: str, date: str, raw_text: str = "") -> str:
     return hasher.hexdigest()
 
 
-def get_input(prompt: str, default: str = "") -> str:
-    """Prompt the user for input and return a non-empty value."""
-    value = input(prompt).strip()
-    return value or default
-
-
-async def login_with_telethon(api_id: int, api_hash: str, phone: str) -> TelegramClient:
-    """Log in to Telegram with a user account and return a Telethon client."""
-    session_name = "events_session_" + "".join(ch for ch in phone if ch.isalnum())
-    session_path = os.path.abspath(f"{session_name}.session")
-    if os.path.exists(session_path):
-        try:
-            os.remove(session_path)
-        except OSError:
-            pass
-    client = TelegramClient(session_path, api_id, api_hash)
-
-    try:
-        await client.start(
-            phone=phone,
-            code_callback=lambda: get_input("Enter the Telegram login code: "),
-            password=lambda: TG_2FA_PASSWORD or get_input("Enter your 2FA password (leave blank if none): "),
-        )
-        return client
-    except Exception as exc:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-        raise RuntimeError(
-            "Telegram login failed. Please make sure you are using the correct phone number, that the code is entered once, and that your account allows sign-in from this environment."
-        ) from exc
-
-
-async def register_telethon_listener(target_chat: str):
-    """Register a Telethon listener that captures new group messages and stores them as events."""
-    api_id = int(os.getenv("TG_API_ID") or TG_API_ID)
-    api_hash = os.getenv("TG_API_HASH") or TG_API_HASH
-    phone = os.getenv("TG_PHONE") or TG_PHONE
-
-    client = await login_with_telethon(api_id, api_hash, phone)
-    entity = await client.get_entity(target_chat)
-
-    @client.on(events.NewMessage(chats=[entity]))
-    async def handle_new_group_message(event):
-        if isinstance(event.message, MessageService):
-            return
-
-        text = event.raw_text or event.message.message or ""
-        if not text:
-            return
-
-        print(f"\n📥 Telethon captured group message: {text[:1000]}")
-        logging.info("Telethon captured group message from %s", event.chat_id)
-
-        events_stored = await process_and_store_events([text])
-        if events_stored:
-            print(f"✅ Stored {events_stored} event(s) from Telethon message.")
-        else:
-            print("ℹ️ Telethon message captured but no new event was stored.")
-
-    return client
-
-
 def call_agnes_ai(raw_text: str):
     """Create a simple event payload from a group message for now."""
     return [
@@ -141,46 +70,45 @@ def call_agnes_ai(raw_text: str):
 
 async def process_and_store_events(raw_data_sources):
     """Process incoming text and store it as an event in the local database."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
     events_stored = 0
-    for raw_text in raw_data_sources:
-        extracted_events = call_agnes_ai(raw_text)
-        for event in extracted_events:
-            event_id = generate_event_id(event["title"], event["date"], raw_text)
-            cursor.execute("SELECT id FROM events WHERE id = ?", (event_id,))
-            if cursor.fetchone():
-                continue
+    async with aiosqlite.connect(DB_NAME) as db:
+        for raw_text in raw_data_sources:
+            extracted_events = call_agnes_ai(raw_text)
+            for event in extracted_events:
+                event_id = generate_event_id(event["title"], event["date"], raw_text)
 
-            cursor.execute(
-                """
-                INSERT INTO events (id, title, event_date, event_time, location, description, category)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
+                async with db.execute("SELECT id FROM events WHERE id = ?", (event_id,)) as cursor:
+                    if await cursor.fetchone():
+                        continue
+
+                await db.execute(
+                    """
+                    INSERT INTO events (id, title, event_date, event_time, location, description, category)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        event["title"],
+                        event["date"],
+                        event.get("time", ""),
+                        event.get("location", ""),
+                        event.get("description", ""),
+                        event.get("category", "General"),
+                    ),
+                )
+                events_stored += 1
+                logging.info("💾 Stored new event: %s", event["title"])
+                await notify_subscribers(
+                    event.get("category", "General"),
                     event["title"],
                     event["date"],
                     event.get("time", ""),
                     event.get("location", ""),
                     event.get("description", ""),
-                    event.get("category", "General"),
-                ),
-            )
-            events_stored += 1
-            logging.info("💾 Stored new event: %s", event["title"])
-            await notify_subscribers(
-                event.get("category", "General"),
-                event["title"],
-                event["date"],
-                event.get("time", ""),
-                event.get("location", ""),
-                event.get("description", ""),
-            )
+                )
 
-    conn.commit()
-    conn.close()
+        await db.commit()
+
     return events_stored
 
 
@@ -285,8 +213,12 @@ async def show_menu(message: types.Message):
 @dp.callback_query(F.data.startswith("view:"))
 async def handle_category_view(callback_query: types.CallbackQuery):
     """Processes interactive selections to extract data updates corresponding to the query selection."""
-    category = callback_query.data.split(":")[1]
+    category = callback_query.data.split(":", 1)[1]
     await callback_query.answer() # Immediately dismiss Telegram loading animations
+
+    if category not in VALID_CATEGORIES:
+        await callback_query.message.answer("⚠️ Unrecognized category.")
+        return
 
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
@@ -311,20 +243,33 @@ async def handle_category_view(callback_query: types.CallbackQuery):
         
     await callback_query.message.answer(response_text)
 
+
+def is_target_group_message(message: types.Message) -> bool:
+    """Return True if the message was posted in the configured target group."""
+    target_username = TARGET_CHAT.lstrip("@").strip().lower()
+    return bool(target_username) and (message.chat.username or "").lower() == target_username
+
+
+@dp.message(is_target_group_message)
+async def handle_group_message(message: types.Message):
+    """Capture new text messages posted in the target events group and store them as events."""
+    text = message.text or message.caption or ""
+    if not text:
+        return
+
+    logging.info("📥 Captured group message from chat %s", message.chat.id)
+    events_stored = await process_and_store_events([text])
+    if events_stored:
+        logging.info("✅ Stored %d event(s) from group message.", events_stored)
+    else:
+        logging.info("ℹ️ Group message captured but no new event was stored.")
+
+
 async def main():
     await init_db()
     await set_bot_commands(bot)
-
-    client = await register_telethon_listener(TARGET_CHAT)
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        polling_task = asyncio.create_task(dp.start_polling(bot))
-        await client.run_until_disconnected()
-        polling_task.cancel()
-        await asyncio.gather(polling_task, return_exceptions=True)
-    finally:
-        await client.disconnect()
-        await dp.stop_polling()
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
