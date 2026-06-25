@@ -156,7 +156,7 @@ async def process_and_store_events(raw_data_sources):
                     ),
                 )
                 events_stored += 1
-                logging.info("💾 Stored new event: %s", event["title"])
+                logging.info("💾 Stored new event: %s [%s]", event["title"], event.get("category", "General"))
                 await notify_subscribers(
                     event.get("category", "General"),
                     event["title"],
