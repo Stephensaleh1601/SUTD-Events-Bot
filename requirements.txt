@@ -2,3 +2,4 @@ aiogram
 aiosqlite
 telethon
 python-dotenv
+httpx

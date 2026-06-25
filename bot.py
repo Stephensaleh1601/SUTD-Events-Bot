@@ -11,6 +11,7 @@ from aiogram.types import BotCommand, KeyboardButton, ReplyKeyboardMarkup
 from dotenv import load_dotenv
 
 from db import init_db
+from agnes_ai import VALID_CATEGORIES, extract_events
 
 load_dotenv()
 
@@ -26,12 +27,6 @@ if not TOKEN:
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
-VALID_CATEGORIES = [
-    "Workshops", "Career talks", "Internship opportunities", 
-    "Scholarships", "Competitions", "Volunteer opportunities", 
-    "CCA sign-ups", "Fifth Row sign-ups", "Networking opportunities"
-]
 
 QUICK_COMMANDS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
@@ -54,26 +49,12 @@ def generate_event_id(title: str, date: str, raw_text: str = "") -> str:
     return hasher.hexdigest()
 
 
-def call_agnes_ai(raw_text: str):
-    """Create a simple event payload from a group message for now."""
-    return [
-        {
-            "title": "AI & Robotics Workshop 2026",
-            "date": "2026-07-15",
-            "time": "14:00 - 17:00",
-            "location": "Campus Tech Lab Room 4",
-            "description": raw_text[:200] + "..." if len(raw_text) > 200 else raw_text,
-            "category": "Workshops",
-        }
-    ]
-
-
 async def process_and_store_events(raw_data_sources):
     """Process incoming text and store it as an event in the local database."""
     events_stored = 0
     async with aiosqlite.connect(DB_NAME) as db:
         for raw_text in raw_data_sources:
-            extracted_events = call_agnes_ai(raw_text)
+            extracted_events = await extract_events(raw_text)
             for event in extracted_events:
                 event_id = generate_event_id(event["title"], event["date"], raw_text)
 

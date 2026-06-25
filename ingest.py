@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 import hashlib
-import sqlite3
+import aiosqlite
 import datetime
 import os
 import logging
@@ -11,6 +11,7 @@ from telethon.tl.types import MessageService
 from dotenv import load_dotenv
 
 from bot import notify_subscribers
+from agnes_ai import extract_events
 
 load_dotenv()
 
@@ -31,8 +32,7 @@ TG_API_HASH = os.getenv("TG_API_HASH", "")
 TG_PHONE = os.getenv("TG_PHONE", "")
 TG_2FA_PASSWORD = os.getenv("TG_2FA_PASSWORD", "")
 
-# Agnes AI & DB Config - set in .env
-AGNES_API_KEY = os.getenv("AGNES_API_KEY", "")
+# DB Config - set in .env
 DB_NAME = os.getenv("DB_NAME", "events_hub.db")
 
 if not BOT_TOKEN:
@@ -52,82 +52,45 @@ def generate_event_id(title, date):
     hasher.update(f"{str(title).strip().lower()}_{str(date).strip()}".encode('utf-8'))
     return hasher.hexdigest()
 
-def call_agnes_ai(raw_text):
-    """
-    Placeholder for your actual Agnes AI API POST request.
-    
-    TODO: Replace this with your real Agnes AI API call.
-    Currently returns mock data to test the database flow.
-    
-    Expected return format:
-    [
-        {
-            "title": "Event Title",
-            "date": "YYYY-MM-DD",
-            "time": "HH:MM - HH:MM",
-            "location": "Event Location",
-            "description": "Full event description",
-            "category": "Category Name"
-        },
-        ...
-    ]
-    """
-    # --- MOCK DATA FOR TESTING ---
-    # Replace this block with your real API call
-    return [
-        {
-            "title": "AI & Robotics Workshop 2026",
-            "date": "2026-07-15",
-            "time": "14:00 - 17:00",
-            "location": "Campus Tech Lab Room 4",
-            "description": raw_text[:200] + "..." if len(raw_text) > 200 else raw_text,
-            "category": "Workshops"
-        }
-    ]
-    # -----------------------------
-
-def process_and_store_events(raw_data_sources):
+async def process_and_store_events(raw_data_sources):
     """Process raw text data through Agnes AI and store events in SQLite."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
     events_stored = 0
-    for raw_text in raw_data_sources:
-        extracted_events = call_agnes_ai(raw_text)
-        
-        for event in extracted_events:
-            event_id = generate_event_id(event['title'], event['date'])
-            
-            # Skip duplicates
-            cursor.execute("SELECT id FROM events WHERE id = ?", (event_id,))
-            if cursor.fetchone():
-                continue
-                
-            cursor.execute("""
-                INSERT INTO events (id, title, event_date, event_time, location, description, category)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                event_id,
-                event['title'],
-                event['date'],
-                event.get('time', ''),
-                event.get('location', ''),
-                event.get('description', ''),
-                event.get('category', 'General')
-            ))
-            events_stored += 1
-            logger.info(f"💾 Stored new event: {event['title']}")
-            asyncio.create_task(notify_subscribers(
-                event.get('category', 'General'),
-                event['title'],
-                event['date'],
-                event.get('time', ''),
-                event.get('location', ''),
-                event.get('description', ''),
-            ))
-            
-    conn.commit()
-    conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        for raw_text in raw_data_sources:
+            extracted_events = await extract_events(raw_text)
+
+            for event in extracted_events:
+                event_id = generate_event_id(event['title'], event['date'])
+
+                # Skip duplicates
+                async with db.execute("SELECT id FROM events WHERE id = ?", (event_id,)) as cursor:
+                    if await cursor.fetchone():
+                        continue
+
+                await db.execute("""
+                    INSERT INTO events (id, title, event_date, event_time, location, description, category)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    event_id,
+                    event['title'],
+                    event['date'],
+                    event.get('time', ''),
+                    event.get('location', ''),
+                    event.get('description', ''),
+                    event.get('category', 'General')
+                ))
+                events_stored += 1
+                logger.info(f"💾 Stored new event: {event['title']}")
+                await notify_subscribers(
+                    event.get('category', 'General'),
+                    event['title'],
+                    event['date'],
+                    event.get('time', ''),
+                    event.get('location', ''),
+                    event.get('description', ''),
+                )
+
+        await db.commit()
     return events_stored
 
 # ==========================================
@@ -178,7 +141,7 @@ def register_group_listener(dp: Dispatcher, target_chat: str):
         logger.info("Captured group message from %s", message.chat.id)
 
         # Send the incoming group message into the same processing pipeline used by the ingestion flow.
-        events_stored = process_and_store_events([text])
+        events_stored = await process_and_store_events([text])
         if events_stored:
             print(f"✅ Stored {events_stored} event(s) from incoming group message.")
         else:
@@ -303,7 +266,7 @@ async def main():
             print("No messages found to process.")
             return
         print(f"Passing {len(raw_messages)} messages to Agnes AI...")
-        events_stored = process_and_store_events(raw_messages)
+        events_stored = await process_and_store_events(raw_messages)
         print(f"History sync complete! 🚀 {events_stored} new events stored.")
         return
 
@@ -331,7 +294,7 @@ async def main():
 
     # 2. Process through AI and Database
     print(f"Passing {len(raw_messages)} messages to Agnes AI...")
-    events_stored = process_and_store_events(raw_messages)
+    events_stored = await process_and_store_events(raw_messages)
     print(f"Ingestion cycle complete! 🚀 {events_stored} new events stored.")
 
 if __name__ == "__main__":

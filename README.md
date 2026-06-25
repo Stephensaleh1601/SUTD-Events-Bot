@@ -7,7 +7,7 @@ A Telegram bot that watches a SUTD events channel/group, extracts event details,
 - `bot.py` runs the user-facing Telegram bot (aiogram). Users `/start`, `/select` a category to follow, and `/menu` to browse events. The bot is an admin member of the target group, so it picks up new group messages directly through its own aiogram handler — no separate login or listener process needed.
 - `ingest.py` is a standalone CLI for backfilling older message history from the target chat. Since the Bot API can't fetch history older than when the bot joined, this script logs in as a regular Telegram user account via Telethon to pull past messages. It can also run a live Telethon listener as an alternative to the bot, but that's no longer necessary now that the bot is in the group.
 - `db.py` initializes the SQLite schema (`events` and `user_preferences` tables).
-- Both `bot.py` and `ingest.py` call `call_agnes_ai()` to turn raw chat text into structured event fields (title, date, time, location, description, category). **This is currently a mock/placeholder** that returns hardcoded sample data — wire it up to your real Agnes AI (or any LLM) call before relying on it.
+- `agnes_ai.py` calls the [Agnes AI](https://agnes-ai.com) chat completions API (`agnes-2.0-flash` by default) to turn raw chat text into structured event fields (title, date, time, location, description, category). It returns an empty list when a message doesn't actually announce an event, so general chatter in the group doesn't get stored as a fake event. Both `bot.py` and `ingest.py` import this module rather than duplicating the API call.
 
 ## Setup
 
@@ -26,7 +26,8 @@ A Telegram bot that watches a SUTD events channel/group, extracts event details,
    To run `bot.py` you'll need:
    - `TELEGRAM_BOT_TOKEN` — create a bot via [@BotFather](https://t.me/BotFather), then add it to the target group as an admin (so it can read group messages).
    - `TARGET_CHAT` — the group's public `@username` the bot should read events from. The bot matches incoming messages by `chat.username`, so the group needs a public username.
-   - `AGNES_API_KEY` — API key for whatever AI service you wire into `call_agnes_ai()`. Currently unused since that function is still a mock.
+   - `AGNES_API_KEY` — your API key from [agnes-ai.com](https://agnes-ai.com), used by `agnes_ai.py` to extract event data. Without it, group messages are still captured but no events will be extracted (a warning is logged).
+   - `AGNES_MODEL` / `AGNES_API_BASE` — optional overrides; default to `agnes-2.0-flash` and `https://apihub.agnes-ai.com/v1`.
 
    To use `ingest.py`'s `--history`/`--listen` backfill modes, you'll additionally need these (not in `.env.example` — add them to your `.env` manually):
    - `TG_API_ID` / `TG_API_HASH` — from [my.telegram.org](https://my.telegram.org), used by Telethon to log in as a regular Telegram user account.
