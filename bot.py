@@ -66,11 +66,46 @@ def build_category_picker_keyboard():
     return builder.as_markup()
 
 
+def build_subscription_checkbox_keyboard(subscribed: set):
+    """Build a checkbox-style inline keyboard for every category.
+
+    Each button is prefixed with ✅ (subscribed) or ⬜ (not subscribed) based on
+    `subscribed`, and tapping it toggles that one category on/off (callback_data
+    "toggle:<category>") - this is what /menu uses to manage subscriptions.
+    """
+    builder = InlineKeyboardBuilder()
+    for category in VALID_CATEGORIES:
+        mark = "✅" if category in subscribed else "⬜"
+        builder.button(text=f"{mark} {category_label(category)}", callback_data=f"toggle:{category}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+async def get_user_categories(user_id: int) -> set:
+    """Return the set of categories a user currently subscribes to."""
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT category FROM user_preferences WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return {row[0] for row in rows}
+
+
 async def subscribe_user(user_id: int, category: str) -> None:
     """Record that a user wants updates for the given category."""
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             "INSERT OR IGNORE INTO user_preferences (user_id, category) VALUES (?, ?)",
+            (user_id, category),
+        )
+        await db.commit()
+
+
+async def unsubscribe_user(user_id: int, category: str) -> None:
+    """Remove a user's subscription to the given category."""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "DELETE FROM user_preferences WHERE user_id = ? AND category = ?",
             (user_id, category),
         )
         await db.commit()
@@ -106,8 +141,8 @@ async def process_and_store_events(raw_data_sources):
 
                 await db.execute(
                     """
-                    INSERT INTO events (id, title, event_date, event_time, location, description, category)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO events (id, title, event_date, event_time, location, description, category, link)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id,
@@ -117,6 +152,7 @@ async def process_and_store_events(raw_data_sources):
                         event.get("location", ""),
                         event.get("description", ""),
                         event.get("category", "General"),
+                        event.get("link", ""),
                     ),
                 )
                 events_stored += 1
@@ -128,6 +164,7 @@ async def process_and_store_events(raw_data_sources):
                     event.get("time", ""),
                     event.get("location", ""),
                     event.get("description", ""),
+                    event.get("link", ""),
                 )
 
         await db.commit()
@@ -200,7 +237,8 @@ async def expire_events_loop(interval_seconds: int = 24 * 60 * 60) -> None:
 async def set_bot_commands(bot: Bot) -> None:
     await bot.set_my_commands([
         BotCommand(command="start", description="Start the bot and see the welcome message"),
-        BotCommand(command="menu", description="View your saved event categories"),
+        BotCommand(command="menu", description="Subscribe/unsubscribe to event categories"),
+        BotCommand(command="listings", description="Browse current listings for categories you follow"),
         BotCommand(command="select", description="Follow a specific event category"),
     ])
 
@@ -214,7 +252,10 @@ async def command_start_handler(message: types.Message):
         "<b>Tap a category below to follow it:</b>",
         reply_markup=build_category_picker_keyboard(),
     )
-    await message.answer("Once you're following something, use <code>/menu</code> any time to view its listings.")
+    await message.answer(
+        "Use <code>/menu</code> any time to subscribe or unsubscribe, "
+        "and <code>/listings</code> to see what's currently posted."
+    )
 
 @dp.message(Command("select"))
 async def select_category(message: types.Message):
@@ -237,7 +278,7 @@ async def select_category(message: types.Message):
     await subscribe_user(message.from_user.id, matched)
     await message.answer(
         f"✅ <b>Subscribed!</b> You'll now get updates for {category_label(matched)}.\n"
-        "Type <code>/menu</code> to view your dashboard."
+        "Use <code>/menu</code> to manage your subscriptions, or <code>/listings</code> to see what's posted."
     )
 
 @dp.callback_query(F.data.startswith("select:"))
@@ -253,10 +294,10 @@ async def handle_category_select(callback_query: types.CallbackQuery):
     await subscribe_user(callback_query.from_user.id, category)
     await callback_query.message.answer(
         f"✅ <b>Subscribed!</b> You'll now get updates for {category_label(category)}.\n"
-        "Type <code>/menu</code> to view your dashboard."
+        "Use <code>/menu</code> to manage your subscriptions, or <code>/listings</code> to see what's posted."
     )
 
-async def notify_subscribers(category: str, event_title: str, event_date: str, event_time: str, location: str, description: str) -> None:
+async def notify_subscribers(category: str, event_title: str, event_date: str, event_time: str, location: str, description: str, link: str = "") -> None:
     """Send a live update to all users who subscribed to the relevant category."""
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT user_id FROM user_preferences WHERE category = ?", (category,)) as cursor:
@@ -278,6 +319,10 @@ async def notify_subscribers(category: str, event_title: str, event_date: str, e
         f"📍 {safe_location}\n\n"
         f"{safe_description}"
     )
+    if link:
+        # html.escape (quote=True by default) also escapes " and ' so the link
+        # can't break out of the href="..." attribute it's placed in.
+        message_text += f"\n\n🔗 <a href=\"{html.escape(link)}\">Sign up here</a>"
 
     for (user_id,) in subscribers:
         try:
@@ -288,20 +333,51 @@ async def notify_subscribers(category: str, event_title: str, event_date: str, e
 
 @dp.message(Command("menu"))
 async def show_menu(message: types.Message):
-    """Constructs dynamic customized menus displaying only opted-in channels."""
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT category FROM user_preferences WHERE user_id = ?", (message.from_user.id,)) as cursor:
-            rows = await cursor.fetchall()
-            
-    if not rows:
+    """Show every category as a checkbox the user can tap to subscribe/unsubscribe."""
+    subscribed = await get_user_categories(message.from_user.id)
+    await message.answer(
+        "📋 <b>Manage your categories</b>\nTap a category to subscribe or unsubscribe:",
+        reply_markup=build_subscription_checkbox_keyboard(subscribed),
+    )
+
+@dp.callback_query(F.data.startswith("toggle:"))
+async def handle_category_toggle(callback_query: types.CallbackQuery):
+    """Handles a tap on a /menu checkbox - toggles that subscription and updates the checkbox in place."""
+    category = callback_query.data.split(":", 1)[1]
+
+    if category not in VALID_CATEGORIES:
+        await callback_query.answer("⚠️ Unrecognized category.", show_alert=True)
+        return
+
+    user_id = callback_query.from_user.id
+    subscribed = await get_user_categories(user_id)
+
+    if category in subscribed:
+        await unsubscribe_user(user_id, category)
+        subscribed.discard(category)
+        await callback_query.answer(f"Unsubscribed from {category}")
+    else:
+        await subscribe_user(user_id, category)
+        subscribed.add(category)
+        await callback_query.answer(f"Subscribed to {category}")
+
+    await callback_query.message.edit_reply_markup(
+        reply_markup=build_subscription_checkbox_keyboard(subscribed)
+    )
+
+@dp.message(Command("listings"))
+async def show_listings(message: types.Message):
+    """Show inline buttons for the categories a user follows, to browse current listings."""
+    subscribed = await get_user_categories(message.from_user.id)
+
+    if not subscribed:
         await message.answer(
-            "You haven't followed any categories yet.\nUse <code>/select &lt;category&gt;</code> first."
+            "You haven't subscribed to any categories yet.\nUse <code>/menu</code> to pick some."
         )
         return
 
     builder = InlineKeyboardBuilder()
-    for row in rows:
-        category_name = row[0]
+    for category_name in sorted(subscribed):
         # Callback data pattern payload: "view:<category_name>" - label is display-only.
         builder.button(text=category_label(category_name), callback_data=f"view:{category_name}")
 
@@ -323,7 +399,7 @@ async def handle_category_view(callback_query: types.CallbackQuery):
 
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
-            "SELECT title, event_date, event_time, location, description FROM events WHERE category = ? ORDER BY event_date ASC",
+            "SELECT title, event_date, event_time, location, description, link FROM events WHERE category = ? ORDER BY event_date ASC",
             (category,)
         ) as cursor:
             events = await cursor.fetchall()
@@ -333,14 +409,17 @@ async def handle_category_view(callback_query: types.CallbackQuery):
         return
 
     lines = [f"<b>{category_label(category)} — current listings</b>\n"]
-    for title, event_date, event_time, location, description in events:
-        lines.append(
+    for title, event_date, event_time, location, description, link in events:
+        entry = (
             f"🔹 <b>{html.escape(title)}</b>\n"
             f"📅 {html.escape(event_date)}   ⏰ {html.escape(event_time) if event_time else 'TBC'}\n"
             f"📍 {html.escape(location) if location else 'TBC'}\n"
-            f"{html.escape(description) if description else '—'}\n"
-            "──────────────────"
+            f"{html.escape(description) if description else '—'}"
         )
+        if link:
+            entry += f"\n🔗 <a href=\"{html.escape(link)}\">Sign up here</a>"
+        entry += "\n──────────────────"
+        lines.append(entry)
 
     await callback_query.message.answer("\n".join(lines))
 

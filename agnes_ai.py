@@ -32,7 +32,9 @@ SYSTEM_PROMPT = (
     '- "time": event time, e.g. "14:00 - 17:00" (use "" if not stated)\n'
     '- "location": event location (use "" if not stated)\n'
     '- "description": a short 1-2 sentence summary of the message\n'
-    '- "category": exactly one of: ' + ", ".join(VALID_CATEGORIES) + "\n\n"
+    '- "category": exactly one of: ' + ", ".join(VALID_CATEGORIES) + "\n"
+    '- "link": a URL people can use to sign up/register/learn more, if one is present '
+    'in the message (use "" if none)\n\n'
     "If the message does not announce a real event with at least a title and a date "
     "(e.g. it's small talk, a question, a reply, or an update with nothing new), respond "
     "with an empty JSON array: []."
@@ -52,11 +54,24 @@ DEDUPE_SYSTEM_PROMPT = (
 )
 
 
+def _clean_link(raw: str) -> str:
+    """Return raw as-is if it looks like a usable http(s) link, else "".
+
+    Guards against the model hallucinating a non-URL value or something like a
+    javascript:/data: URI ending up stored and later rendered as a clickable
+    <a href> in an HTML-mode Telegram message.
+    """
+    candidate = str(raw or "").strip()
+    if candidate.lower().startswith(("http://", "https://")):
+        return candidate
+    return ""
+
+
 async def extract_events(raw_text: str) -> list[dict]:
     """Call the Agnes AI API to extract zero or more structured events from raw_text.
 
     Returns a list of event dicts (possibly empty) with keys: title, date, time,
-    location, description, category. Never raises - on any failure it logs a
+    location, description, category, link. Never raises - on any failure it logs a
     warning and returns an empty list so a flaky AI response can't crash the caller.
     """
     api_key = os.getenv("AGNES_API_KEY", "")
@@ -139,6 +154,7 @@ def _parse_events(content: str) -> list[dict]:
             "location": str(item.get("location", "")).strip(),
             "description": str(item.get("description", "")).strip(),
             "category": category,
+            "link": _clean_link(item.get("link", "")),
         })
     return events
 

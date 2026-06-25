@@ -14,6 +14,7 @@ async def init_db():
                 location TEXT,
                 description TEXT,
                 category TEXT,
+                link TEXT DEFAULT '',
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -25,6 +26,15 @@ async def init_db():
                 PRIMARY KEY (user_id, category)
             )
         """)
+        # Migration for databases created before the `link` column existed.
+        # CREATE TABLE IF NOT EXISTS above only applies to brand-new tables, so
+        # existing installs need this ALTER TABLE too. SQLite has no
+        # "ADD COLUMN IF NOT EXISTS", so the duplicate-column error (raised when
+        # the column is already there) is simply ignored.
+        try:
+            await db.execute("ALTER TABLE events ADD COLUMN link TEXT DEFAULT ''")
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
 
 if __name__ == "__main__":
