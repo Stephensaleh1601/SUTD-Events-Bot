@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import hashlib
 import aiosqlite
 import datetime
 import os
@@ -10,8 +9,8 @@ from telethon import TelegramClient
 from telethon.tl.types import MessageService
 from dotenv import load_dotenv
 
-from bot import notify_subscribers
-from agnes_ai import extract_events
+from bot import process_and_store_events
+from dedupe import dedupe_exact, dedupe_semantic
 
 load_dotenv()
 
@@ -46,52 +45,10 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
-def generate_event_id(title, date):
-    """Generate a unique ID for an event based on title and date."""
-    hasher = hashlib.sha256()
-    hasher.update(f"{str(title).strip().lower()}_{str(date).strip()}".encode('utf-8'))
-    return hasher.hexdigest()
-
-async def process_and_store_events(raw_data_sources):
-    """Process raw text data through Agnes AI and store events in SQLite."""
-    events_stored = 0
-    async with aiosqlite.connect(DB_NAME) as db:
-        for raw_text in raw_data_sources:
-            extracted_events = await extract_events(raw_text)
-
-            for event in extracted_events:
-                event_id = generate_event_id(event['title'], event['date'])
-
-                # Skip duplicates
-                async with db.execute("SELECT id FROM events WHERE id = ?", (event_id,)) as cursor:
-                    if await cursor.fetchone():
-                        continue
-
-                await db.execute("""
-                    INSERT INTO events (id, title, event_date, event_time, location, description, category)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    event_id,
-                    event['title'],
-                    event['date'],
-                    event.get('time', ''),
-                    event.get('location', ''),
-                    event.get('description', ''),
-                    event.get('category', 'General')
-                ))
-                events_stored += 1
-                logger.info(f"💾 Stored new event: {event['title']}")
-                await notify_subscribers(
-                    event.get('category', 'General'),
-                    event['title'],
-                    event['date'],
-                    event.get('time', ''),
-                    event.get('location', ''),
-                    event.get('description', ''),
-                )
-
-        await db.commit()
-    return events_stored
+# process_and_store_events (and the generate_event_id it relies on) lives in
+# bot.py and is imported above, so both ingestion paths (live capture and
+# history backfill) always agree on how an event's ID is computed and
+# stored - no duplicate implementations to drift out of sync.
 
 # ==========================================
 # 3. TELEGRAM MESSAGE FETCHER (using aiogram)
@@ -250,7 +207,22 @@ async def main():
     parser.add_argument("--chat", default=TARGET_CHAT, help="Override the target chat ID/username")
     parser.add_argument("--chat-value", dest="chat_value", default=None, help="Alternative way to pass the target chat when the @ symbol is problematic")
     parser.add_argument("--offset", type=int, default=0, help="Message ID offset for pagination")
+    parser.add_argument(
+        "--dedupe", action="store_true",
+        help="Scan the database for duplicate events and remove them (exact-match pass, then an Agnes AI semantic pass), then exit",
+    )
     args = parser.parse_args()
+
+    if args.dedupe:
+        print("🧹 Scanning for exact-match duplicates (same title + date)...")
+        removed_exact = await dedupe_exact(DB_NAME)
+        print(f"   Removed {removed_exact} exact duplicate row(s).")
+        print("🧹 Scanning for semantic duplicates via Agnes AI...")
+        removed_semantic = await dedupe_semantic(DB_NAME)
+        print(f"   Removed {removed_semantic} semantic duplicate row(s).")
+        total = removed_exact + removed_semantic
+        print(f"✅ Dedup complete. {total} total row(s) removed." if total else "✅ Dedup complete. No duplicates found.")
+        return
 
     bot = Bot(token=BOT_TOKEN)
     chat_target = args.chat_value or args.chat

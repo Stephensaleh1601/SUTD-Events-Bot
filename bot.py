@@ -74,10 +74,17 @@ async def subscribe_user(user_id: int, category: str) -> None:
         await db.commit()
 
 
-def generate_event_id(title: str, date: str, raw_text: str = "") -> str:
-    """Generate a deterministic event ID from the event details and source text."""
+def generate_event_id(title: str, date: str) -> str:
+    """Generate a deterministic event ID from the event's title and date.
+
+    Deliberately based on title+date only (not the raw source text), so the
+    same real-world event reposted/reworded - or captured once live via
+    bot.py and once via ingest.py's history backfill - always hashes to the
+    same ID and can't be double-stored. This is the single source of truth
+    for ID generation; ingest.py imports it rather than keeping its own copy.
+    """
     hasher = hashlib.sha256()
-    source = f"{str(title).strip().lower()}_{str(date).strip()}_{str(raw_text).strip().lower()}"
+    source = f"{str(title).strip().lower()}_{str(date).strip()}"
     hasher.update(source.encode("utf-8"))
     return hasher.hexdigest()
 
@@ -89,7 +96,7 @@ async def process_and_store_events(raw_data_sources):
         for raw_text in raw_data_sources:
             extracted_events = await extract_events(raw_text)
             for event in extracted_events:
-                event_id = generate_event_id(event["title"], event["date"], raw_text)
+                event_id = generate_event_id(event["title"], event["date"])
 
                 async with db.execute("SELECT id FROM events WHERE id = ?", (event_id,)) as cursor:
                     if await cursor.fetchone():

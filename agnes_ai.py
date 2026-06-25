@@ -38,6 +38,19 @@ SYSTEM_PROMPT = (
     "with an empty JSON array: []."
 )
 
+DEDUPE_SYSTEM_PROMPT = (
+    "You are given a numbered list of event listings already stored in a university events "
+    "database. Each line has an id, title, date, time, location, and description. Some entries "
+    "may describe the exact same real-world event even though the wording, date format, or "
+    "details differ slightly - for example one entry might be a reminder repost of another, or "
+    "the title/date may have been extracted slightly differently from two separate messages "
+    "about the same happening.\n\n"
+    "Respond with ONLY a JSON array of arrays (no other text), where each inner array lists the "
+    "ids of entries that all refer to the same real-world event. Only include groups of 2 or "
+    "more ids - omit any entry that has no duplicate. If there are no duplicates at all, respond "
+    "with an empty JSON array: []."
+)
+
 
 async def extract_events(raw_text: str) -> list[dict]:
     """Call the Agnes AI API to extract zero or more structured events from raw_text.
@@ -123,3 +136,91 @@ def _parse_events(content: str) -> list[dict]:
             "category": category,
         })
     return events
+
+
+async def find_semantic_duplicate_groups(events: list[dict]) -> list[list[str]]:
+    """Ask Agnes AI which stored events (by id) describe the same real-world event.
+
+    events: a list of dicts with keys id, title, date, time, location, description -
+    typically every row currently in the events table (or whatever's left after a
+    cheaper exact-match pass). This is meant to catch duplicates that differ in
+    wording/date format and so wouldn't share an id or an exact (title, date) key.
+
+    Returns a list of id-groups, each with 2+ ids that the model judged to be the
+    same event. Never raises - on any failure (missing key, bad response, etc.) it
+    logs a warning and returns [], so a flaky AI response can never delete the
+    wrong rows.
+    """
+    api_key = os.getenv("AGNES_API_KEY", "")
+    if not api_key:
+        logging.warning("AGNES_API_KEY is not set; skipping semantic dedup pass.")
+        return []
+
+    if len(events) < 2:
+        return []
+
+    api_base = os.getenv("AGNES_API_BASE", DEFAULT_API_BASE).rstrip("/")
+    model = os.getenv("AGNES_MODEL", DEFAULT_MODEL)
+
+    listing = "\n".join(
+        f"{idx}. id={event['id']} title={event.get('title', '')!r} date={event.get('date', '')!r} "
+        f"time={event.get('time', '')!r} location={event.get('location', '')!r} "
+        f"description={event.get('description', '')!r}"
+        for idx, event in enumerate(events, 1)
+    )
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": DEDUPE_SYSTEM_PROMPT},
+            {"role": "user", "content": listing},
+        ],
+        "temperature": 0,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(f"{api_base}/chat/completions", json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        logging.warning("Agnes AI dedup request failed: %s", exc)
+        return []
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        logging.warning("Unexpected Agnes AI response shape: %s (%s)", data, exc)
+        return []
+
+    cleaned = (content or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        logging.warning("Could not parse Agnes AI dedup response as JSON: %s | raw: %s", exc, content[:300])
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    valid_ids = {str(event["id"]) for event in events}
+    groups = []
+    for group in parsed:
+        if not isinstance(group, list):
+            continue
+        ids = [str(i) for i in group if str(i) in valid_ids]
+        # De-dupe within the group itself and require at least 2 distinct ids
+        ids = list(dict.fromkeys(ids))
+        if len(ids) >= 2:
+            groups.append(ids)
+    return groups
