@@ -9,7 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import BotCommand, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import BotCommand
 
 from dotenv import load_dotenv
 
@@ -51,17 +51,27 @@ def category_label(category: str) -> str:
     return f"{CATEGORY_EMOJI.get(category, '📌')} {category}"
 
 
-QUICK_COMMANDS_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="/select Workshops"), KeyboardButton(text="/select Career talks")],
-        [KeyboardButton(text="/select Internship opportunities"), KeyboardButton(text="/select Scholarships")],
-        [KeyboardButton(text="/select Competitions"), KeyboardButton(text="/select Volunteer opportunities")],
-        [KeyboardButton(text="/select CCA sign-ups"), KeyboardButton(text="/select Fifth Row sign-ups")],
-        [KeyboardButton(text="/select Networking opportunities")],
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=False,
-)
+def build_category_picker_keyboard():
+    """Build an inline keyboard with one tappable button per category.
+
+    Tapping a button just picks that category directly (callback_data
+    "select:<category>") - no slash command text is ever shown or sent.
+    """
+    builder = InlineKeyboardBuilder()
+    for category in VALID_CATEGORIES:
+        builder.button(text=category_label(category), callback_data=f"select:{category}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+async def subscribe_user(user_id: int, category: str) -> None:
+    """Record that a user wants updates for the given category."""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO user_preferences (user_id, category) VALUES (?, ?)",
+            (user_id, category),
+        )
+        await db.commit()
 
 
 def generate_event_id(title: str, date: str, raw_text: str = "") -> str:
@@ -127,51 +137,53 @@ async def set_bot_commands(bot: Bot) -> None:
 async def command_start_handler(message: types.Message):
     """Initializes onboarding sequences by allowing users to toggle their preferred interests."""
     first_name = html.escape(message.from_user.first_name or "there")
-    categories_list = "\n".join(f"  {category_label(c)}" for c in VALID_CATEGORIES)
     await message.answer(
         f"👋 <b>Welcome to the SUTD Event Hub Bot, {first_name}!</b>\n\n"
         "I'll notify you the moment a new event matching your interests is posted.\n\n"
-        "<b>Get started:</b>\n"
-        "1️⃣ <code>/select &lt;Category Name&gt;</code> — follow a category\n"
-        "2️⃣ <code>/menu</code> — view events for your followed categories\n\n"
-        f"<b>Available categories:</b>\n{categories_list}",
-        reply_markup=QUICK_COMMANDS_KEYBOARD,
+        "<b>Tap a category below to follow it:</b>",
+        reply_markup=build_category_picker_keyboard(),
     )
+    await message.answer("Once you're following something, use <code>/menu</code> any time to view its listings.")
 
 @dp.message(Command("select"))
 async def select_category(message: types.Message):
     """Saves user interest mappings directly to the local preference table."""
     category_input = message.text.replace("/select", "").strip()
-    
+
+    if not category_input:
+        await message.answer(
+            "Tap a category to follow it:",
+            reply_markup=build_category_picker_keyboard(),
+        )
+        return
+
     # Simple match check
     matched = next((c for c in VALID_CATEGORIES if c.lower() == category_input.lower()), None)
     if not matched:
         await message.answer("⚠️ <b>Category not recognized.</b>\nPlease copy the exact name from the options menu list.")
         return
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO user_preferences (user_id, category) VALUES (?, ?)",
-            (message.from_user.id, matched)
-        )
-        await db.commit()
-
+    await subscribe_user(message.from_user.id, matched)
     await message.answer(
         f"✅ <b>Subscribed!</b> You'll now get updates for {category_label(matched)}.\n"
         "Type <code>/menu</code> to view your dashboard."
     )
 
-@dp.message(F.text.in_(["/start", "/menu"] + [f"/select {cat}" for cat in VALID_CATEGORIES]))
-async def quick_command_handler(message: types.Message):
-    """Handles the quick-access command buttons shown in the keyboard."""
-    if message.text == "/start":
-        await command_start_handler(message)
+@dp.callback_query(F.data.startswith("select:"))
+async def handle_category_select(callback_query: types.CallbackQuery):
+    """Handles a tap on one of the category-picker buttons - the actual selection action."""
+    category = callback_query.data.split(":", 1)[1]
+    await callback_query.answer() # Immediately dismiss Telegram loading animations
+
+    if category not in VALID_CATEGORIES:
+        await callback_query.message.answer("⚠️ Unrecognized category.")
         return
-    if message.text == "/menu":
-        await show_menu(message)
-        return
-    if message.text.startswith("/select"):
-        await select_category(message)
+
+    await subscribe_user(callback_query.from_user.id, category)
+    await callback_query.message.answer(
+        f"✅ <b>Subscribed!</b> You'll now get updates for {category_label(category)}.\n"
+        "Type <code>/menu</code> to view your dashboard."
+    )
 
 async def notify_subscribers(category: str, event_title: str, event_date: str, event_time: str, location: str, description: str) -> None:
     """Send a live update to all users who subscribed to the relevant category."""
